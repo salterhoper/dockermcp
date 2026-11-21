@@ -26,6 +26,11 @@ services:
       GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
       MCP_OAUTH_ALLOWED_DOMAINS: ${MCP_OAUTH_ALLOWED_DOMAINS:-}
       MCP_OAUTH_TOKEN_TTL_DAYS: ${MCP_OAUTH_TOKEN_TTL_DAYS:-90}
+      # Fixed confidential OAuth client for platform connectors (e.g. Gemini)
+      # that use a client id/secret instead of dynamic registration.
+      MCP_OAUTH_STATIC_CLIENT_ID: ${MCP_OAUTH_STATIC_CLIENT_ID:-}
+      MCP_OAUTH_STATIC_CLIENT_SECRET: ${MCP_OAUTH_STATIC_CLIENT_SECRET:-}
+      MCP_OAUTH_STATIC_REDIRECT_URIS: ${MCP_OAUTH_STATIC_REDIRECT_URIS:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${HOST_PORT:-8081}:8081"
     volumes:

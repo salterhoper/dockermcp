@@ -19,6 +19,7 @@ import (
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/auth"
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/config"
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/db"
+	"github.com/sirtheprogrammer/docker-deployments/server/internal/googleoauth"
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/store"
 )
 
@@ -54,6 +55,7 @@ func newOAuthTestServer(t *testing.T) (*Server, http.Handler, *store.Store) {
 		Log:     log,
 		Store:   st,
 		Hasher:  auth.NewHasher(sessSecret[:]),
+		Google:  googleoauth.New("test-client-id", "test-client-secret"),
 		Started: time.Now(),
 	}
 	h, err := s.Routes()
@@ -194,6 +196,102 @@ func TestOAuthAuthorizeRejectsBadPKCE(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("unknown client: status = %d, want 400", rec.Code)
 	}
+}
+
+func TestOAuthConfidentialClientFlow(t *testing.T) {
+	s, h, st := newOAuthTestServer(t)
+	// Provision a fixed confidential client, as used by Gemini's connector.
+	const (
+		cid       = "gemini-client"
+		csecret   = "super-secret-value-123456"
+		cRedirect = "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-abc"
+	)
+	s.Config.StaticClientID = cid
+	s.Config.StaticClientSecret = csecret
+	s.Config.StaticRedirectURIs = []string{cRedirect}
+
+	ctx := context.Background()
+	admin, err := st.CreateFirstAdmin(ctx, "admin@example.com", "Admin", "hash")
+	if err != nil {
+		t.Fatalf("CreateFirstAdmin: %v", err)
+	}
+
+	t.Run("authorize without PKCE is accepted and redirects to Google", func(t *testing.T) {
+		q := url.Values{}
+		q.Set("response_type", "code")
+		q.Set("client_id", cid)
+		q.Set("redirect_uri", cRedirect)
+		q.Set("state", "st")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+q.Encode(), nil))
+		if rec.Code != http.StatusFound {
+			t.Fatalf("status = %d, want 302; body=%s", rec.Code, rec.Body.String())
+		}
+		if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, "https://accounts.google.com/") {
+			t.Errorf("Location = %q, want redirect to Google", loc)
+		}
+	})
+
+	post := func(form url.Values) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// An authorization code issued to the confidential client, with no PKCE.
+	writeCode := func() string {
+		plain := randToken()
+		if err := st.CreateAuthCode(ctx, s.Hasher.Hash(plain), store.AuthCode{
+			ClientID:    cid,
+			UserID:      admin.ID,
+			RedirectURI: cRedirect,
+			Scope:       "mcp",
+			ExpiresAt:   time.Now().Add(5 * time.Minute),
+		}); err != nil {
+			t.Fatalf("CreateAuthCode: %v", err)
+		}
+		return plain
+	}
+
+	t.Run("token with client secret succeeds", func(t *testing.T) {
+		code := writeCode()
+		rec := post(url.Values{
+			"grant_type":    {"authorization_code"},
+			"code":          {code},
+			"redirect_uri":  {cRedirect},
+			"client_id":     {cid},
+			"client_secret": {csecret},
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var resp map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		if tok, _ := resp["access_token"].(string); !strings.HasPrefix(tok, auth.APITokenPrefix) {
+			t.Errorf("access_token = %v", resp["access_token"])
+		}
+	})
+
+	t.Run("token with wrong secret is rejected", func(t *testing.T) {
+		code := writeCode()
+		rec := post(url.Values{
+			"grant_type":    {"authorization_code"},
+			"code":          {code},
+			"redirect_uri":  {cRedirect},
+			"client_id":     {cid},
+			"client_secret": {"wrong"},
+		})
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401; body=%s", rec.Code, rec.Body.String())
+		}
+		var resp map[string]string
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		if resp["error"] != "invalid_client" {
+			t.Errorf("error = %q, want invalid_client", resp["error"])
+		}
+	})
 }
 
 func TestOAuthTokenFlow(t *testing.T) {

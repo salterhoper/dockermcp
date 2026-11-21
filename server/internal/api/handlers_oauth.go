@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -42,7 +44,7 @@ func (s *Server) handleOAuthMetadata(w http.ResponseWriter, r *http.Request) err
 		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code"},
 		"code_challenge_methods_supported":      []string{auth.PKCEMethodS256},
-		"token_endpoint_auth_methods_supported": []string{"none"},
+		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post", "client_secret_basic"},
 		"scopes_supported":                      []string{mcpScope},
 	})
 }
@@ -105,7 +107,7 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) er
 	clientID := q.Get("client_id")
 	redirectURI := q.Get("redirect_uri")
 
-	client, err := s.Store.OAuthClientByID(r.Context(), clientID)
+	redirectURIs, confidential, err := s.lookupAuthorizeClient(r.Context(), clientID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return s.oauthHTMLError(w, http.StatusBadRequest, "Unknown client",
@@ -115,7 +117,7 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) er
 	}
 	// The redirect target must be pre-registered before we will send anything,
 	// including an error, to it.
-	if redirectURI == "" || !containsStr(client.RedirectURIs, redirectURI) {
+	if redirectURI == "" || !containsStr(redirectURIs, redirectURI) {
 		return s.oauthHTMLError(w, http.StatusBadRequest, "Invalid redirect",
 			"The redirect URI does not match this client's registration.")
 	}
@@ -124,9 +126,21 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) er
 	if q.Get("response_type") != "code" {
 		return s.redirectOAuthError(w, r, redirectURI, state, "unsupported_response_type", "only the authorization code flow is supported")
 	}
+	// PKCE is mandatory for public (dynamically registered) clients and optional
+	// for a confidential client that authenticates with its secret. When sent,
+	// it must be S256 and is still verified at the token endpoint.
 	challenge := q.Get("code_challenge")
-	if challenge == "" || q.Get("code_challenge_method") != auth.PKCEMethodS256 {
-		return s.redirectOAuthError(w, r, redirectURI, state, "invalid_request", "PKCE with S256 is required")
+	method := q.Get("code_challenge_method")
+	switch {
+	case confidential:
+		if challenge != "" && method != auth.PKCEMethodS256 {
+			return s.redirectOAuthError(w, r, redirectURI, state, "invalid_request", "only S256 PKCE is supported")
+		}
+	default:
+		if challenge == "" || method != auth.PKCEMethodS256 {
+			return s.redirectOAuthError(w, r, redirectURI, state, "invalid_request", "PKCE with S256 is required")
+		}
+		method = auth.PKCEMethodS256
 	}
 
 	googleState := randToken()
@@ -136,7 +150,7 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) er
 		RedirectURI:         redirectURI,
 		ClientState:         state,
 		CodeChallenge:       challenge,
-		CodeChallengeMethod: auth.PKCEMethodS256,
+		CodeChallengeMethod: method,
 		Scope:               q.Get("scope"),
 		Resource:            q.Get("resource"),
 		ExpiresAt:           time.Now().Add(10 * time.Minute),
@@ -237,9 +251,9 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) error 
 	code := r.PostForm.Get("code")
 	redirectURI := r.PostForm.Get("redirect_uri")
 	verifier := r.PostForm.Get("code_verifier")
-	clientID := r.PostForm.Get("client_id")
-	if code == "" || verifier == "" {
-		return s.oauthJSONError(w, http.StatusBadRequest, "invalid_request", "code and code_verifier are required")
+	clientID, clientSecret := clientCredentials(r)
+	if code == "" {
+		return s.oauthJSONError(w, http.StatusBadRequest, "invalid_request", "code is required")
 	}
 
 	authCode, err := s.Store.ConsumeAuthCode(r.Context(), s.Hasher.Hash(code))
@@ -255,8 +269,26 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) error 
 	if clientID != "" && clientID != authCode.ClientID {
 		return s.oauthJSONError(w, http.StatusBadRequest, "invalid_client", "client_id does not match the authorization request")
 	}
-	if !auth.VerifyPKCE(authCode.CodeChallenge, authCode.CodeChallengeMethod, verifier) {
-		return s.oauthJSONError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
+
+	// A confidential client authenticates with its secret; a public client
+	// proves possession with PKCE. We enforce whichever applies to this code's
+	// client, and additionally verify PKCE whenever a challenge was recorded.
+	confidential := s.isConfidentialClient(authCode.ClientID)
+	if confidential {
+		if !s.verifyStaticClientSecret(authCode.ClientID, clientSecret) {
+			return s.oauthJSONError(w, http.StatusUnauthorized, "invalid_client", "client authentication failed")
+		}
+	} else if authCode.CodeChallenge == "" {
+		// Public clients always have a challenge; its absence is a bug or abuse.
+		return s.oauthJSONError(w, http.StatusBadRequest, "invalid_grant", "missing PKCE challenge")
+	}
+	if authCode.CodeChallenge != "" {
+		if verifier == "" {
+			return s.oauthJSONError(w, http.StatusBadRequest, "invalid_request", "code_verifier is required")
+		}
+		if !auth.VerifyPKCE(authCode.CodeChallenge, authCode.CodeChallengeMethod, verifier) {
+			return s.oauthJSONError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
+		}
 	}
 
 	user, err := s.Store.UserByID(r.Context(), authCode.UserID)
@@ -303,6 +335,47 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) error 
 
 func (s *Server) googleRedirectURI() string {
 	return s.Config.AppURL + "/api/auth/google/callback"
+}
+
+// lookupAuthorizeClient resolves a client at the authorize step, returning its
+// allowed redirect URIs and whether it is the confidential static client.
+func (s *Server) lookupAuthorizeClient(ctx context.Context, clientID string) (redirectURIs []string, confidential bool, err error) {
+	if s.isConfidentialClient(clientID) {
+		return s.Config.StaticRedirectURIs, true, nil
+	}
+	client, err := s.Store.OAuthClientByID(ctx, clientID)
+	if err != nil {
+		return nil, false, err
+	}
+	return client.RedirectURIs, false, nil
+}
+
+func (s *Server) isConfidentialClient(clientID string) bool {
+	return s.Config.StaticClientConfigured() && clientID != "" && clientID == s.Config.StaticClientID
+}
+
+func (s *Server) verifyStaticClientSecret(clientID, secret string) bool {
+	if !s.isConfidentialClient(clientID) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(secret), []byte(s.Config.StaticClientSecret)) == 1
+}
+
+// clientCredentials reads client_id/client_secret from either HTTP Basic auth
+// (client_secret_basic) or the form body (client_secret_post). A value present
+// in the form takes precedence; Basic fills in anything the form omitted.
+func clientCredentials(r *http.Request) (id, secret string) {
+	id = r.PostForm.Get("client_id")
+	secret = r.PostForm.Get("client_secret")
+	if bu, bp, ok := r.BasicAuth(); ok {
+		if id == "" {
+			id = bu
+		}
+		if secret == "" {
+			secret = bp
+		}
+	}
+	return id, secret
 }
 
 func (s *Server) oauthDomainAllowed(email string) bool {

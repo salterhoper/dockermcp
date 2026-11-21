@@ -73,6 +73,15 @@ type Config struct {
 	// MCPTokenTTL bounds the lifetime of the API token minted at the end of the
 	// OAuth flow. Zero means the token never expires.
 	MCPTokenTTL time.Duration
+
+	// A statically provisioned confidential OAuth client, for platform
+	// connectors (e.g. Gemini) that expect a fixed client_id/secret and a
+	// pre-whitelisted redirect URI rather than dynamic registration. When set,
+	// this client authenticates at the token endpoint with its secret and PKCE
+	// is optional for it; dynamic (public, PKCE) clients are unaffected.
+	StaticClientID     string
+	StaticClientSecret string
+	StaticRedirectURIs []string
 }
 
 func (c *Config) IsProduction() bool { return c.Env == "production" }
@@ -81,6 +90,12 @@ func (c *Config) IsProduction() bool { return c.Env == "production" }
 // false, the OAuth discovery/authorize/token/register routes are not mounted.
 func (c *Config) OAuthEnabled() bool {
 	return c != nil && c.GoogleClientID != "" && c.GoogleClientSecret != ""
+}
+
+// StaticClientConfigured reports whether a fixed confidential OAuth client is
+// provisioned via the environment.
+func (c *Config) StaticClientConfigured() bool {
+	return c != nil && c.StaticClientID != "" && c.StaticClientSecret != ""
 }
 
 // Load reads configuration from the environment.
@@ -161,6 +176,10 @@ func Load() (*Config, error) {
 	cfg.GoogleClientID = strings.TrimSpace(os.Getenv("GOOGLE_OAUTH_CLIENT_ID"))
 	cfg.GoogleClientSecret = strings.TrimSpace(os.Getenv("GOOGLE_OAUTH_CLIENT_SECRET"))
 	cfg.OAuthAllowedDomains = splitList(os.Getenv("MCP_OAUTH_ALLOWED_DOMAINS"))
+
+	cfg.StaticClientID = strings.TrimSpace(os.Getenv("MCP_OAUTH_STATIC_CLIENT_ID"))
+	cfg.StaticClientSecret = strings.TrimSpace(os.Getenv("MCP_OAUTH_STATIC_CLIENT_SECRET"))
+	cfg.StaticRedirectURIs = splitListRaw(os.Getenv("MCP_OAUTH_STATIC_REDIRECT_URIS"))
 
 	ttlDays, err := envInt("MCP_OAUTH_TOKEN_TTL_DAYS", 90)
 	if err != nil {
@@ -346,11 +365,23 @@ func envOr(name, fallback string) string {
 }
 
 // splitList parses a comma-separated env value into a lower-cased, trimmed
-// slice, dropping empty entries.
+// slice, dropping empty entries. Used for case-insensitive values like domains.
 func splitList(raw string) []string {
 	var out []string
 	for _, part := range strings.Split(raw, ",") {
 		if p := strings.ToLower(strings.TrimSpace(part)); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// splitListRaw is splitList without case folding, for case-sensitive values
+// such as redirect URIs.
+func splitListRaw(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.TrimSpace(part); p != "" {
 			out = append(out, p)
 		}
 	}
