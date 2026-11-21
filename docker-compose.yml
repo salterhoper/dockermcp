@@ -20,6 +20,12 @@ services:
       DATABASE_URL: ${DATABASE_URL:-}
       APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:?set APP_ENCRYPTION_KEY in .env}
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      # Google-backed MCP OAuth (optional). Leave blank to keep the MCP endpoint
+      # on API-token auth only. See .env.example for setup.
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      MCP_OAUTH_ALLOWED_DOMAINS: ${MCP_OAUTH_ALLOWED_DOMAINS:-}
+      MCP_OAUTH_TOKEN_TTL_DAYS: ${MCP_OAUTH_TOKEN_TTL_DAYS:-90}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${HOST_PORT:-8081}:8081"
     volumes:
