@@ -138,6 +138,13 @@ func (s *Server) requirePermission(perm auth.Permission, next Handler) Handler {
 	return func(w http.ResponseWriter, r *http.Request) error {
 		id, ok := IdentityFrom(r.Context())
 		if !ok {
+			// Tell a spec MCP client (e.g. Gemini) where to begin the OAuth
+			// handshake. RFC 9728 §5.1: point at the protected-resource
+			// metadata via the WWW-Authenticate challenge on the 401.
+			if s.Config.OAuthEnabled() && isMCPPath(r.URL.Path) {
+				w.Header().Set("WWW-Authenticate",
+					`Bearer resource_metadata="`+s.Config.AppURL+`/.well-known/oauth-protected-resource"`)
+			}
 			return Unauthorized("Sign in to continue.")
 		}
 		if !id.User.IsActive() {

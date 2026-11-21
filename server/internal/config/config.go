@@ -57,9 +57,31 @@ type Config struct {
 	DeployRemoteRoot string
 	// DeployConcurrency bounds how many builds run at once.
 	DeployConcurrency int
+
+	// Google-backed MCP OAuth. When GoogleClientID and GoogleClientSecret are
+	// both set, the MCP endpoint advertises OAuth 2.1 so Gemini (or any spec
+	// MCP client) can self-register, authenticate the human with Google, and
+	// obtain an access token. Empty disables the whole feature and the MCP
+	// endpoint keeps its existing bearer-token-only behaviour.
+	GoogleClientID     string
+	GoogleClientSecret string
+	// OAuthAllowedDomains optionally restricts which verified Google email
+	// domains may complete the flow, on top of the hard requirement that the
+	// email already belongs to a dockdeploy user. Empty means "any domain,
+	// provided the user exists".
+	OAuthAllowedDomains []string
+	// MCPTokenTTL bounds the lifetime of the API token minted at the end of the
+	// OAuth flow. Zero means the token never expires.
+	MCPTokenTTL time.Duration
 }
 
 func (c *Config) IsProduction() bool { return c.Env == "production" }
+
+// OAuthEnabled reports whether Google-backed MCP OAuth is configured. When
+// false, the OAuth discovery/authorize/token/register routes are not mounted.
+func (c *Config) OAuthEnabled() bool {
+	return c != nil && c.GoogleClientID != "" && c.GoogleClientSecret != ""
+}
 
 // Load reads configuration from the environment.
 func Load() (*Config, error) {
@@ -134,6 +156,25 @@ func Load() (*Config, error) {
 
 	if err := resolveSecrets(cfg); err != nil {
 		note("%v", err)
+	}
+
+	cfg.GoogleClientID = strings.TrimSpace(os.Getenv("GOOGLE_OAUTH_CLIENT_ID"))
+	cfg.GoogleClientSecret = strings.TrimSpace(os.Getenv("GOOGLE_OAUTH_CLIENT_SECRET"))
+	cfg.OAuthAllowedDomains = splitList(os.Getenv("MCP_OAUTH_ALLOWED_DOMAINS"))
+
+	ttlDays, err := envInt("MCP_OAUTH_TOKEN_TTL_DAYS", 90)
+	if err != nil {
+		note("%v", err)
+	} else if ttlDays < 0 || ttlDays > 3650 {
+		note("MCP_OAUTH_TOKEN_TTL_DAYS must be between 0 and 3650 days")
+	} else {
+		cfg.MCPTokenTTL = time.Duration(ttlDays) * 24 * time.Hour
+	}
+
+	// A production OAuth deployment must issue https redirect URIs: Google
+	// rejects anything else, and bearer tokens would otherwise travel in clear.
+	if cfg.OAuthEnabled() && cfg.Env == "production" && !strings.HasPrefix(cfg.AppURL, "https://") {
+		note("APP_URL must be an https:// URL when Google OAuth is enabled, got %q", cfg.AppURL)
 	}
 
 	switch level := strings.ToLower(envOr("LOG_LEVEL", "info")); level {
@@ -302,4 +343,16 @@ func envOr(name, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// splitList parses a comma-separated env value into a lower-cased, trimmed
+// slice, dropping empty entries.
+func splitList(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.ToLower(strings.TrimSpace(part)); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

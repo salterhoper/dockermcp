@@ -24,6 +24,7 @@ import (
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/db"
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/deploy"
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/discovery"
+	"github.com/sirtheprogrammer/docker-deployments/server/internal/googleoauth"
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/mcp"
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/nginxx"
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/secrets"
@@ -71,12 +72,12 @@ func run() error {
 	log := newLogger(cfg)
 	slog.SetDefault(log)
 
-	fmt.Printf("\n" +
-		"  ┌─────────────────────────────────────────────────────────────┐\n" +
-		"  │                     dockdeploy control plane                │\n" +
-		"  │  Version:  %-48s │\n" +
-		"  │  Database: %-48s │\n" +
-		"  │  URL:      %-48s │\n" +
+	fmt.Printf("\n"+
+		"  ┌─────────────────────────────────────────────────────────────┐\n"+
+		"  │                     dockdeploy control plane                │\n"+
+		"  │  Version:  %-48s │\n"+
+		"  │  Database: %-48s │\n"+
+		"  │  URL:      %-48s │\n"+
 		"  └─────────────────────────────────────────────────────────────┘\n\n",
 		api.Version, string(cfg.DatabaseDriver)+": "+cfg.DatabaseURL, cfg.AppURL)
 
@@ -158,6 +159,12 @@ func run() error {
 	aiService := ai.NewService(st, sealer, serverManager)
 	mcpServer := mcp.NewServer(st, sealer, serverManager)
 
+	var googleClient *googleoauth.Client
+	if cfg.OAuthEnabled() {
+		googleClient = googleoauth.New(cfg.GoogleClientID, cfg.GoogleClientSecret)
+		log.Info("google-backed MCP OAuth enabled", "issuer", cfg.AppURL)
+	}
+
 	srv := &api.Server{
 		Config:    cfg,
 		Log:       log,
@@ -170,6 +177,7 @@ func run() error {
 		Discovery: discoveryService,
 		AI:        aiService,
 		MCP:       mcpServer,
+		Google:    googleClient,
 		Started:   time.Now(),
 		SPA:       web.Handler(log, `Run <code>npm run dev</code> in <code>frontend/</code> and open the Vite URL, or build the image to embed the dashboard.`),
 	}
@@ -333,4 +341,3 @@ func runMCP() error {
 
 	return mcpServer.RunStdio(ctx)
 }
-

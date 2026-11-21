@@ -14,6 +14,7 @@ import (
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/config"
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/deploy"
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/discovery"
+	"github.com/sirtheprogrammer/docker-deployments/server/internal/googleoauth"
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/mcp"
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/nginxx"
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/secrets"
@@ -42,6 +43,9 @@ type Server struct {
 	AI *ai.Service
 	// MCP provides Model Context Protocol tooling for external AI agents.
 	MCP *mcp.Server
+	// Google authenticates the human during the MCP OAuth flow. Nil unless
+	// Config.OAuthEnabled(); handlers guard on that before using it.
+	Google *googleoauth.Client
 
 	// SPA serves the built frontend. Requests that do not match /api are
 	// handed here, so the controller runs as a single container.
@@ -87,6 +91,12 @@ func (s *Server) Routes() (http.Handler, error) {
 			a.open(http.MethodPost, "/login/2fa", s.handleLogin2FA)
 			a.open(http.MethodGet, "/invitations/{token}", s.handleInvitationPreview)
 			a.open(http.MethodPost, "/invitations/{token}/accept", s.handleAcceptInvitation)
+
+			// Google OAuth callback for the MCP authorization flow. Public by
+			// necessity: Google redirects the browser here with no session.
+			if s.Config.OAuthEnabled() {
+				a.open(http.MethodGet, "/google/callback", s.handleGoogleCallback)
+			}
 
 			a.guarded(http.MethodPost, "/logout", auth.PermSelf, s.handleLogout)
 			a.guarded(http.MethodGet, "/me", auth.PermSelf, s.handleMe)
@@ -252,6 +262,19 @@ func (s *Server) Routes() (http.Handler, error) {
 			return MethodNotAllowed(r.Method)
 		}))
 	})
+
+	// OAuth 2.1 authorization-server + protected-resource surface for the MCP
+	// endpoint. These live at the origin root (outside /api) so the well-known
+	// discovery URLs resolve where RFC 8414 / RFC 9728 clients look, and so the
+	// token and registration POSTs bypass the cookie-oriented /api middleware
+	// (CSRF, audit). They are unauthenticated by design; see handlers_oauth.go.
+	if s.Config.OAuthEnabled() {
+		root.open(http.MethodGet, "/.well-known/oauth-authorization-server", s.handleOAuthMetadata)
+		root.open(http.MethodGet, "/.well-known/oauth-protected-resource", s.handleProtectedResourceMetadata)
+		root.open(http.MethodGet, "/oauth/authorize", s.handleOAuthAuthorize)
+		root.open(http.MethodPost, "/oauth/token", s.handleOAuthToken)
+		root.open(http.MethodPost, "/oauth/register", s.handleOAuthRegister)
+	}
 
 	if s.SPA != nil {
 		r.Handle("/*", s.SPA)
