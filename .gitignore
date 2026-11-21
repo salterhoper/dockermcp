@@ -24,9 +24,8 @@ id_ed25519*
 *.sqlite3
 
 # Compiled binaries & build artifacts
-dockdeploy
-*/dockdeploy
-server/dockdeploy
+# NOTE: patterns are anchored so they ignore ONLY the compiled binary,
+# not the server/cmd/dockdeploy/ source directory.
 /dockdeploy
 /server/dockdeploy
 /server/cmd/dockdeploy/dockdeploy
