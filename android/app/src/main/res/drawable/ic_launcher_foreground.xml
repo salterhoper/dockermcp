@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Container stack emblem in crisp neutral white & emerald -->
+    <path
+        android:fillColor="#F4F4F5"
+        android:pathData="M34,34h16v12h-16zM58,34h16v12h-16zM34,50h16v12h-16zM58,50h16v12h-16z" />
+    <path
+        android:fillColor="#D4D4D8"
+        android:pathData="M28,66h52c0,8 -8,14 -26,14s-26,-6 -26,-14z" />
+    <path
+        android:fillColor="#22C55E"
+        android:pathData="M46,24h16v6h-16z" />
+</vector>

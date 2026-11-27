@@ -19,6 +19,160 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) error {
 	return JSON(w, s.Log, http.StatusOK, map[string]any{"users": users})
 }
 
+type serverGrantDTO struct {
+	ServerID   string `json:"server_id"`
+	Permission string `json:"permission"`
+}
+
+func (s *Server) parseServerGrants(r *http.Request, raw []serverGrantDTO) ([]store.ServerGrantInput, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]bool, len(raw))
+	out := make([]store.ServerGrantInput, 0, len(raw))
+	for _, item := range raw {
+		id := item.ServerID
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		perm := store.ServerPermission(item.Permission)
+		if perm == "" {
+			perm = store.ServerOperate
+		}
+		if perm != store.ServerRead && perm != store.ServerOperate {
+			return nil, Invalid(fields{"server_grants": "Server permission must be read or operate."})
+		}
+		if _, err := s.Store.ServerByID(r.Context(), id); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, Invalid(fields{"server_grants": "One or more selected servers do not exist."})
+			}
+			return nil, Internal(err)
+		}
+		out = append(out, store.ServerGrantInput{ServerID: id, Permission: perm})
+	}
+	return out, nil
+}
+
+type createUserRequest struct {
+	Email        string           `json:"email"`
+	Name         string           `json:"name"`
+	Password     string           `json:"password"`
+	Role         string           `json:"role"`
+	ServerGrants []serverGrantDTO `json:"server_grants"`
+}
+
+func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) error {
+	var req createUserRequest
+	if err := DecodeJSON(w, r, &req); err != nil {
+		return err
+	}
+
+	f := fields{}
+	email := f.email("email", req.Email)
+	name := f.required("name", req.Name, 1, 100)
+	role, err := auth.ParseRole(req.Role)
+	if err != nil {
+		f.add("role", err.Error())
+	}
+	if err := auth.ValidatePassword(req.Password); err != nil {
+		f.add("password", err.Error())
+	}
+	if err := f.err(); err != nil {
+		return err
+	}
+
+	if _, err := s.Store.UserByEmail(r.Context(), email); err == nil {
+		return Invalid(fields{"email": "Someone with that email already has an account."})
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return Internal(err)
+	}
+
+	grants, err := s.parseServerGrants(r, req.ServerGrants)
+	if err != nil {
+		return err
+	}
+
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		return Internal(err)
+	}
+
+	created, err := s.Store.CreateUserWithGrants(r.Context(), email, name, hash, role, grants)
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return Invalid(fields{"email": "Someone with that email already has an account."})
+		}
+		return Internal(err)
+	}
+
+	AuditResource(r.Context(), "users", created.ID)
+	AuditMeta(r.Context(), "email", email)
+	AuditMeta(r.Context(), "role", string(role))
+	AuditMeta(r.Context(), "scoped_servers", len(grants))
+
+	return JSON(w, s.Log, http.StatusCreated, created)
+}
+
+func (s *Server) handleListUserServers(w http.ResponseWriter, r *http.Request) error {
+	targetID := chi.URLParam(r, "userID")
+	if _, err := s.Store.UserByID(r.Context(), targetID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return NotFound("No such user.")
+		}
+		return Internal(err)
+	}
+
+	grants, err := s.Store.ListUserServerGrants(r.Context(), targetID)
+	if err != nil {
+		return Internal(err)
+	}
+	if grants == nil {
+		grants = []store.UserServerGrant{}
+	}
+	return JSON(w, s.Log, http.StatusOK, map[string]any{"grants": grants})
+}
+
+type setUserServersRequest struct {
+	Grants []serverGrantDTO `json:"grants"`
+}
+
+func (s *Server) handleSetUserServers(w http.ResponseWriter, r *http.Request) error {
+	targetID := chi.URLParam(r, "userID")
+	if _, err := s.Store.UserByID(r.Context(), targetID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return NotFound("No such user.")
+		}
+		return Internal(err)
+	}
+
+	var req setUserServersRequest
+	if err := DecodeJSON(w, r, &req); err != nil {
+		return err
+	}
+
+	parsed, err := s.parseServerGrants(r, req.Grants)
+	if err != nil {
+		return err
+	}
+
+	if err := s.Store.SetUserServerGrants(r.Context(), targetID, parsed); err != nil {
+		return Internal(err)
+	}
+
+	updated, err := s.Store.ListUserServerGrants(r.Context(), targetID)
+	if err != nil {
+		return Internal(err)
+	}
+	if updated == nil {
+		updated = []store.UserServerGrant{}
+	}
+
+	AuditResource(r.Context(), "users", targetID)
+	AuditMeta(r.Context(), "scoped_servers", len(updated))
+	return JSON(w, s.Log, http.StatusOK, map[string]any{"grants": updated})
+}
+
 type updateUserRequest struct {
 	Name   string `json:"name"`
 	Role   string `json:"role"`
@@ -150,9 +304,10 @@ func (s *Server) handleListInvitations(w http.ResponseWriter, r *http.Request) e
 }
 
 type createInvitationRequest struct {
-	Email string `json:"email"`
-	Name  string `json:"name"`
-	Role  string `json:"role"`
+	Email        string           `json:"email"`
+	Name         string           `json:"name"`
+	Role         string           `json:"role"`
+	ServerGrants []serverGrantDTO `json:"server_grants"`
 }
 
 type createInvitationResponse struct {
@@ -185,14 +340,19 @@ func (s *Server) handleCreateInvitation(w http.ResponseWriter, r *http.Request) 
 		return Internal(err)
 	}
 
+	grants, err := s.parseServerGrants(r, req.ServerGrants)
+	if err != nil {
+		return err
+	}
+
 	token, hash, err := s.Hasher.NewToken()
 	if err != nil {
 		return Internal(err)
 	}
 
 	actor := MustIdentity(r.Context())
-	invitation, err := s.Store.CreateInvitation(r.Context(), email, req.Name, role,
-		actor.User.ID, hash, time.Now().Add(invitationLifetime))
+	invitation, err := s.Store.CreateInvitationWithGrants(r.Context(), email, req.Name, role,
+		actor.User.ID, hash, time.Now().Add(invitationLifetime), grants)
 	if err != nil {
 		return Internal(err)
 	}

@@ -70,9 +70,65 @@ export interface CreatedInvitation extends Invitation {
   url: string
 }
 
+export interface ServerGrantInput {
+  server_id: string
+  permission: 'read' | 'operate'
+}
+
+export interface UserServerGrant {
+  server_id: string
+  server_name: string
+  host: string
+  permission: 'read' | 'operate'
+  created_at: string
+}
+
+export interface CreateUserInput {
+  email: string
+  name: string
+  password: string
+  role: Role
+  server_grants?: ServerGrantInput[]
+}
+
+export function useCreateUser() {
+  const queryClient = useQueryClient()
+  return useMutation<User, ApiError, CreateUserInput>({
+    mutationFn: (body) => api.post<User>('/users', body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: usersKey })
+    },
+  })
+}
+
+export function useUserServers(userId: string, enabled = true) {
+  return useQuery<UserServerGrant[], ApiError>({
+    queryKey: ['users', userId, 'servers'],
+    queryFn: async ({ signal }) =>
+      (await api.get<{ grants: UserServerGrant[] }>(`/users/${userId}/servers`, { signal })).grants ?? [],
+    enabled: enabled && userId !== '',
+  })
+}
+
+export function useSetUserServers(userId: string) {
+  const queryClient = useQueryClient()
+  return useMutation<UserServerGrant[], ApiError, ServerGrantInput[]>({
+    mutationFn: async (grants) =>
+      (await api.put<{ grants: UserServerGrant[] }>(`/users/${userId}/servers`, { grants })).grants ?? [],
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['users', userId, 'servers'] })
+      void queryClient.invalidateQueries({ queryKey: ['servers'] })
+    },
+  })
+}
+
 export function useCreateInvitation() {
   const queryClient = useQueryClient()
-  return useMutation<CreatedInvitation, ApiError, { email: string; name: string; role: Role }>({
+  return useMutation<
+    CreatedInvitation,
+    ApiError,
+    { email: string; name: string; role: Role; server_grants?: ServerGrantInput[] }
+  >({
     mutationFn: (body) => api.post<CreatedInvitation>('/invitations', body),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: invitationsKey })

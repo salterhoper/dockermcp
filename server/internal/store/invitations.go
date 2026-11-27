@@ -31,8 +31,12 @@ const invitationColumns = `id, email, name, role, invited_by, expires_at, accept
 // same address. Without the replace, re-inviting someone would leave two valid
 // links and no way to tell which was revoked.
 func (s *Store) CreateInvitation(ctx context.Context, email, name string, role auth.Role, invitedBy string, tokenHash []byte, expiresAt time.Time) (*Invitation, error) {
+	return s.CreateInvitationWithGrants(ctx, email, name, role, invitedBy, tokenHash, expiresAt, nil)
+}
+
+func (s *Store) CreateInvitationWithGrants(ctx context.Context, email, name string, role auth.Role, invitedBy string, tokenHash []byte, expiresAt time.Time, grants []ServerGrantInput) (*Invitation, error) {
 	if s.sqlite != nil {
-		return s.sqlite.CreateInvitation(ctx, email, name, role, invitedBy, tokenHash, expiresAt)
+		return s.sqlite.CreateInvitationWithGrants(ctx, email, name, role, invitedBy, tokenHash, expiresAt, grants)
 	}
 	var invitation *Invitation
 	err := s.tx(ctx, func(tx pgx.Tx) error {
@@ -53,6 +57,19 @@ func (s *Store) CreateInvitation(ctx context.Context, email, name string, role a
 		created, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByName[Invitation])
 		if err != nil {
 			return wrap("store: create invitation", err)
+		}
+		for _, g := range grants {
+			perm := g.Permission
+			if perm != ServerRead && perm != ServerOperate {
+				perm = ServerOperate
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO invitation_server_grants (invitation_id, server_id, permission)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (invitation_id, server_id) DO UPDATE SET permission = EXCLUDED.permission`,
+				created.ID, g.ServerID, perm); err != nil {
+				return wrap("store: create invitation server grant", err)
+			}
 		}
 		invitation = &created
 		return nil
@@ -128,6 +145,13 @@ func (s *Store) AcceptInvitation(ctx context.Context, invitationID, name, passwo
 			`UPDATE invitations SET accepted_user_id = $2 WHERE id = $1`,
 			invitationID, created.ID); err != nil {
 			return wrap("store: link invitation", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO server_members (server_id, user_id, permission)
+			SELECT server_id, $2, permission FROM invitation_server_grants WHERE invitation_id = $1
+			ON CONFLICT (server_id, user_id) DO UPDATE SET permission = EXCLUDED.permission`,
+			invitationID, created.ID); err != nil {
+			return wrap("store: apply invitation server grants", err)
 		}
 		user = &created
 		return nil

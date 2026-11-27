@@ -78,3 +78,12 @@ coverage.html
 profile.out
 *.tmp
 plan.md
+
+# Android release signing & build outputs
+*.jks
+*.keystore
+keystore.properties
+android/keystore/
+android/app/build/
+*.apk
+*.aab

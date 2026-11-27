@@ -152,10 +152,10 @@ export function ServerTerminal({ server, onClose, standalone = false }: ServerTe
         fontSize: 13,
         lineHeight: 1.25,
         theme: {
-          background: '#09090b',
+          background: '#000000',
           foreground: '#f4f4f5',
-          cursor: '#38bdf8',
-          selectionBackground: '#27272a',
+          cursor: '#f4f4f5',
+          selectionBackground: '#262626',
           black: '#18181b',
           red: '#f87171',
           green: '#4ade80',

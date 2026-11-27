@@ -245,6 +245,24 @@ func (s *Server) requireServer(r *http.Request) (*store.Server, error) {
 	return server, nil
 }
 
+// requireServerOperate ensures the caller has 'operate' permission on the server
+// (or is an admin). Users with 'read'-only grant can inspect but not mutate.
+func (s *Server) requireServerOperate(r *http.Request) (*store.Server, error) {
+	server, err := s.requireServer(r)
+	if err != nil {
+		return nil, err
+	}
+	actor := MustIdentity(r.Context())
+	canOp, err := s.Store.CanOperateServer(r.Context(), server.ID, actor.User.ID, actor.Role() == auth.RoleAdmin)
+	if err != nil {
+		return nil, Internal(err)
+	}
+	if !canOp {
+		return nil, Forbidden("You only have read-only access to this server.")
+	}
+	return server, nil
+}
+
 func (s *Server) handleGetServer(w http.ResponseWriter, r *http.Request) error {
 	server, err := s.requireServer(r)
 	if err != nil {
@@ -259,7 +277,7 @@ type updateServerRequest struct {
 }
 
 func (s *Server) handleUpdateServer(w http.ResponseWriter, r *http.Request) error {
-	server, err := s.requireServer(r)
+	server, err := s.requireServerOperate(r)
 	if err != nil {
 		return err
 	}
@@ -532,7 +550,7 @@ func (s *Server) runElevated(ctx context.Context, server *store.Server, conn *ss
 }
 
 func (s *Server) handleExecRoot(w http.ResponseWriter, r *http.Request) error {
-	server, err := s.requireServer(r)
+	server, err := s.requireServerOperate(r)
 	if err != nil {
 		return err
 	}
@@ -589,7 +607,7 @@ type installDockerResponse struct {
 }
 
 func (s *Server) handleInstallDocker(w http.ResponseWriter, r *http.Request) error {
-	server, err := s.requireServer(r)
+	server, err := s.requireServerOperate(r)
 	if err != nil {
 		return err
 	}

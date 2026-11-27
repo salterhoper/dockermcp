@@ -102,22 +102,44 @@ func (s *Store) CreateFirstAdmin(ctx context.Context, email, name, passwordHash 
 }
 
 func (s *Store) CreateUser(ctx context.Context, email, name, passwordHash string, role auth.Role) (*User, error) {
+	return s.CreateUserWithGrants(ctx, email, name, passwordHash, role, nil)
+}
+
+func (s *Store) CreateUserWithGrants(ctx context.Context, email, name, passwordHash string, role auth.Role, grants []ServerGrantInput) (*User, error) {
 	if s.sqlite != nil {
-		return s.sqlite.CreateUser(ctx, email, name, passwordHash, role)
+		return s.sqlite.CreateUserWithGrants(ctx, email, name, passwordHash, role, grants)
 	}
-	rows, err := s.pool.Query(ctx, `
-		INSERT INTO users (email, name, password_hash, role)
-		VALUES ($1, $2, $3, $4)
-		RETURNING `+userColumns,
-		NormaliseEmail(email), name, passwordHash, role)
-	if err != nil {
-		return nil, wrap("store: create user", err)
-	}
-	user, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByName[User])
-	if err != nil {
-		return nil, wrap("store: create user", err)
-	}
-	return &user, nil
+	var user *User
+	err := s.tx(ctx, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			INSERT INTO users (email, name, password_hash, role)
+			VALUES ($1, $2, $3, $4)
+			RETURNING `+userColumns,
+			NormaliseEmail(email), name, passwordHash, role)
+		if err != nil {
+			return wrap("store: create user", err)
+		}
+		created, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByName[User])
+		if err != nil {
+			return wrap("store: create user", err)
+		}
+		for _, g := range grants {
+			perm := g.Permission
+			if perm != ServerRead && perm != ServerOperate {
+				perm = ServerOperate
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO server_members (server_id, user_id, permission)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (server_id, user_id) DO UPDATE SET permission = EXCLUDED.permission`,
+				g.ServerID, created.ID, perm); err != nil {
+				return wrap("store: grant server access on create user", err)
+			}
+		}
+		user = &created
+		return nil
+	})
+	return user, err
 }
 
 func (s *Store) UserByEmail(ctx context.Context, email string) (*User, error) {

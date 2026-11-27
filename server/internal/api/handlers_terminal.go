@@ -85,7 +85,7 @@ type windowSizeMsg struct {
 // handleServerTerminal attaches an interactive SSH PTY session over a WebSocket
 // to the selected server for operator administration and troubleshooting.
 func (s *Server) handleServerTerminal(w http.ResponseWriter, r *http.Request) error {
-	server, err := s.requireServer(r)
+	server, err := s.requireServerOperate(r)
 	if err != nil {
 		return err
 	}

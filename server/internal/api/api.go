@@ -121,8 +121,11 @@ func (s *Server) Routes() (http.Handler, error) {
 
 		api.group("/users", func(u routes) {
 			u.guarded(http.MethodGet, "/", auth.PermUserRead, s.handleListUsers)
+			u.guarded(http.MethodPost, "/", auth.PermUserWrite, s.handleCreateUser)
 			u.guarded(http.MethodPatch, "/{userID}", auth.PermUserWrite, s.handleUpdateUser)
 			u.guarded(http.MethodDelete, "/{userID}", auth.PermUserWrite, s.handleDeleteUser)
+			u.guarded(http.MethodGet, "/{userID}/servers", auth.PermUserRead, s.handleListUserServers)
+			u.guarded(http.MethodPut, "/{userID}/servers", auth.PermUserWrite, s.handleSetUserServers)
 		})
 
 		api.group("/invitations", func(i routes) {

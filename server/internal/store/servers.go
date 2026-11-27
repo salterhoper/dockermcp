@@ -439,3 +439,72 @@ func (s *Store) RevokeServerAccess(ctx context.Context, serverID, userID string)
 		`DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`, serverID, userID)
 	return wrap("store: revoke server access", err)
 }
+
+type ServerGrantInput struct {
+	ServerID   string           `json:"server_id"`
+	Permission ServerPermission `json:"permission"`
+}
+
+type UserServerGrant struct {
+	ServerID   string           `db:"server_id"   json:"server_id"`
+	ServerName string           `db:"server_name" json:"server_name"`
+	Host       string           `db:"host"        json:"host"`
+	Permission ServerPermission `db:"permission"  json:"permission"`
+	CreatedAt  time.Time        `db:"created_at"  json:"created_at"`
+}
+
+func (s *Store) CanOperateServer(ctx context.Context, serverID, userID string, isAdmin bool) (bool, error) {
+	if isAdmin {
+		return true, nil
+	}
+	if s.sqlite != nil {
+		return s.sqlite.CanOperateServer(ctx, serverID, userID, isAdmin)
+	}
+	var allowed bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 AND permission = 'operate')`,
+		serverID, userID).Scan(&allowed)
+	return allowed, wrap("store: operate check", err)
+}
+
+func (s *Store) ListUserServerGrants(ctx context.Context, userID string) ([]UserServerGrant, error) {
+	if s.sqlite != nil {
+		return s.sqlite.ListUserServerGrants(ctx, userID)
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT m.server_id, sv.name AS server_name, sv.host, m.permission, m.created_at
+		FROM server_members m
+		JOIN servers sv ON sv.id = m.server_id
+		WHERE m.user_id = $1
+		ORDER BY sv.name`, userID)
+	if err != nil {
+		return nil, wrap("store: list user server grants", err)
+	}
+	grants, err := pgx.CollectRows(rows, pgx.RowToStructByName[UserServerGrant])
+	return grants, wrap("store: list user server grants", err)
+}
+
+func (s *Store) SetUserServerGrants(ctx context.Context, userID string, grants []ServerGrantInput) error {
+	if s.sqlite != nil {
+		return s.sqlite.SetUserServerGrants(ctx, userID, grants)
+	}
+	return s.tx(ctx, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `DELETE FROM server_members WHERE user_id = $1`, userID); err != nil {
+			return wrap("store: clear user server grants", err)
+		}
+		for _, g := range grants {
+			perm := g.Permission
+			if perm != ServerRead && perm != ServerOperate {
+				perm = ServerOperate
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO server_members (server_id, user_id, permission)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (server_id, user_id) DO UPDATE SET permission = EXCLUDED.permission`,
+				g.ServerID, userID, perm); err != nil {
+				return wrap("store: insert user server grant", err)
+			}
+		}
+		return nil
+	})
+}

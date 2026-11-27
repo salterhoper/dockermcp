@@ -28,15 +28,15 @@ export interface IconPackMeta {
 export const THEMES: ThemeMeta[] = [
   {
     id: 'dark',
-    name: 'Zinc Dark',
-    description: 'Classic deep charcoal interface designed for day-long operations.',
+    name: 'Pitch Black',
+    description: 'Pure true-black interface with crisp neutral contrast for day-long operations.',
     isDark: true,
     preview: {
-      bg: '#18181b',
-      card: '#27272a',
-      primary: '#38bdf8',
-      accent: '#3f3f46',
-      border: '#3f3f46',
+      bg: '#000000',
+      card: '#0e0e0e',
+      primary: '#f4f4f5',
+      accent: '#1a1a1a',
+      border: '#262626',
     },
   },
   {

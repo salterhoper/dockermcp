@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/sirtheprogrammer/docker-deployments/server/internal/auth"
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/dockerx"
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/servers"
 	"github.com/sirtheprogrammer/docker-deployments/server/internal/store"
@@ -114,6 +115,12 @@ func (s *Server) handleContainerAction(w http.ResponseWriter, r *http.Request) e
 	defer cancel()
 
 	containerID := chi.URLParam(r, "containerID")
+
+	if canOp, opErr := s.Store.CanOperateServer(r.Context(), server.ID, MustIdentity(r.Context()).User.ID, MustIdentity(r.Context()).Role() == auth.RoleAdmin); opErr != nil {
+		return Internal(opErr)
+	} else if !canOp {
+		return Forbidden("You only have read-only access to this server.")
+	}
 
 	// Record the name before acting: after a remove, it is gone.
 	name := containerID

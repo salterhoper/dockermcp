@@ -167,26 +167,49 @@ func (s *sqliteStore) CreateFirstAdmin(ctx context.Context, email, name, passwor
 }
 
 func (s *sqliteStore) CreateUser(ctx context.Context, email, name, passwordHash string, role auth.Role) (*User, error) {
-	id := newUUID()
-	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO users (id, email, name, password_hash, role, status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, 'active', $6, $6)`,
-		id, NormaliseEmail(email), name, passwordHash, role, now)
-	if err != nil {
-		return nil, wrapSQLite("store: create user", err)
-	}
+	return s.CreateUserWithGrants(ctx, email, name, passwordHash, role, nil)
+}
 
-	return &User{
-		ID:           id,
-		Email:        NormaliseEmail(email),
-		Name:         name,
-		PasswordHash: passwordHash,
-		Role:         role,
-		Status:       UserActive,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}, nil
+func (s *sqliteStore) CreateUserWithGrants(ctx context.Context, email, name, passwordHash string, role auth.Role, grants []ServerGrantInput) (*User, error) {
+	var user *User
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		id := newUUID()
+		now := time.Now().UTC()
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO users (id, email, name, password_hash, role, status, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, 'active', $6, $6)`,
+			id, NormaliseEmail(email), name, passwordHash, role, now)
+		if err != nil {
+			return wrapSQLite("store: create user", err)
+		}
+
+		for _, g := range grants {
+			perm := g.Permission
+			if perm != ServerRead && perm != ServerOperate {
+				perm = ServerOperate
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO server_members (server_id, user_id, permission, created_at)
+				VALUES ($1, $2, $3, $4)
+				ON CONFLICT (server_id, user_id) DO UPDATE SET permission = excluded.permission`,
+				g.ServerID, id, perm, now); err != nil {
+				return wrapSQLite("store: grant server access on create user", err)
+			}
+		}
+
+		user = &User{
+			ID:           id,
+			Email:        NormaliseEmail(email),
+			Name:         name,
+			PasswordHash: passwordHash,
+			Role:         role,
+			Status:       UserActive,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		return nil
+	})
+	return user, err
 }
 
 func (s *sqliteStore) UserByEmail(ctx context.Context, email string) (*User, error) {
@@ -534,6 +557,10 @@ func (s *sqliteStore) PurgeExpiredSessions(ctx context.Context) (int64, error) {
 // --- Invitations ---
 
 func (s *sqliteStore) CreateInvitation(ctx context.Context, email, name string, role auth.Role, invitedBy string, tokenHash []byte, expiresAt time.Time) (*Invitation, error) {
+	return s.CreateInvitationWithGrants(ctx, email, name, role, invitedBy, tokenHash, expiresAt, nil)
+}
+
+func (s *sqliteStore) CreateInvitationWithGrants(ctx context.Context, email, name string, role auth.Role, invitedBy string, tokenHash []byte, expiresAt time.Time, grants []ServerGrantInput) (*Invitation, error) {
 	var inv *Invitation
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `DELETE FROM invitations WHERE email = $1 AND accepted_at IS NULL`, NormaliseEmail(email))
@@ -549,6 +576,20 @@ func (s *sqliteStore) CreateInvitation(ctx context.Context, email, name string, 
 			id, NormaliseEmail(email), name, role, nullable(invitedBy), tokenHash, expiresAt, now)
 		if err != nil {
 			return wrapSQLite("store: create invitation", err)
+		}
+
+		for _, g := range grants {
+			perm := g.Permission
+			if perm != ServerRead && perm != ServerOperate {
+				perm = ServerOperate
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO invitation_server_grants (invitation_id, server_id, permission)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (invitation_id, server_id) DO UPDATE SET permission = excluded.permission`,
+				id, g.ServerID, perm); err != nil {
+				return wrapSQLite("store: create invitation server grant", err)
+			}
 		}
 
 		inv = &Invitation{
@@ -639,6 +680,15 @@ func (s *sqliteStore) AcceptInvitation(ctx context.Context, invitationID, name, 
 			UPDATE invitations SET accepted_user_id = $1 WHERE id = $2`, userID, invitationID)
 		if err != nil {
 			return wrapSQLite("store: link invitation", err)
+		}
+
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO server_members (server_id, user_id, permission, created_at)
+			SELECT server_id, $2, permission, $3 FROM invitation_server_grants WHERE invitation_id = $1
+			ON CONFLICT (server_id, user_id) DO UPDATE SET permission = excluded.permission`,
+			invitationID, userID, now)
+		if err != nil {
+			return wrapSQLite("store: apply invitation server grants", err)
 		}
 
 		user = &User{
@@ -1223,6 +1273,64 @@ func (s *sqliteStore) GrantServerAccess(ctx context.Context, serverID, userID st
 func (s *sqliteStore) RevokeServerAccess(ctx context.Context, serverID, userID string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`, serverID, userID)
 	return wrapSQLite("store: revoke server access", err)
+}
+
+func (s *sqliteStore) CanOperateServer(ctx context.Context, serverID, userID string, isAdmin bool) (bool, error) {
+	if isAdmin {
+		return true, nil
+	}
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM server_members WHERE server_id = $1 AND user_id = $2 AND permission = 'operate'`, serverID, userID).Scan(&count)
+	if err != nil {
+		return false, wrapSQLite("store: operate check", err)
+	}
+	return count > 0, nil
+}
+
+func (s *sqliteStore) ListUserServerGrants(ctx context.Context, userID string) ([]UserServerGrant, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT m.server_id, sv.name, sv.host, m.permission, m.created_at
+		FROM server_members m
+		JOIN servers sv ON sv.id = m.server_id
+		WHERE m.user_id = $1
+		ORDER BY sv.name`, userID)
+	if err != nil {
+		return nil, wrapSQLite("store: list user server grants", err)
+	}
+	defer rows.Close()
+
+	var grants []UserServerGrant
+	for rows.Next() {
+		var g UserServerGrant
+		if err := rows.Scan(&g.ServerID, &g.ServerName, &g.Host, &g.Permission, &g.CreatedAt); err != nil {
+			return nil, wrapSQLite("store: scan user server grant", err)
+		}
+		grants = append(grants, g)
+	}
+	return grants, rows.Err()
+}
+
+func (s *sqliteStore) SetUserServerGrants(ctx context.Context, userID string, grants []ServerGrantInput) error {
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM server_members WHERE user_id = $1`, userID); err != nil {
+			return wrapSQLite("store: clear user server grants", err)
+		}
+		now := time.Now().UTC()
+		for _, g := range grants {
+			perm := g.Permission
+			if perm != ServerRead && perm != ServerOperate {
+				perm = ServerOperate
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO server_members (server_id, user_id, permission, created_at)
+				VALUES ($1, $2, $3, $4)
+				ON CONFLICT (server_id, user_id) DO UPDATE SET permission = excluded.permission`,
+				g.ServerID, userID, perm, now); err != nil {
+				return wrapSQLite("store: insert user server grant", err)
+			}
+		}
+		return nil
+	})
 }
 
 func scanServer(r interface{ Scan(...any) error }) (*Server, error) {
